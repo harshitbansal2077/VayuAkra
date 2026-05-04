@@ -4,6 +4,8 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 from scipy.spatial import KDTree
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
 st.set_page_config(
     page_title="Project VayuAkra",
@@ -36,6 +38,12 @@ st.markdown("""
     .stDataFrame { background: #0d1f35; border-radius: 8px; }
     footer { visibility: hidden; }
     #MainMenu { visibility: hidden; }
+    .chat-msg-user { background: linear-gradient(135deg, #1a3a5c, #1e4a7a); border: 1px solid #2a5a8c; border-radius: 16px 16px 4px 16px; padding: 14px 18px; margin: 8px 0 8px 60px; color: #e8f4fd; font-size: 0.92rem; line-height: 1.6; }
+    .chat-msg-ai { background: linear-gradient(135deg, #0d1f35, #0f2840); border: 1px solid #1e3a5f; border-radius: 16px 16px 16px 4px; padding: 14px 18px; margin: 8px 60px 8px 0; color: #c8dff0; font-size: 0.92rem; line-height: 1.6; }
+    .chat-avatar-ai { font-size: 1.4rem; margin-bottom: 4px; }
+    .chat-container { max-height: 520px; overflow-y: auto; padding: 12px 0; }
+    .suggestion-pill { display: inline-block; background: #0d1f35; border: 1px solid #2a5a8c; border-radius: 20px; padding: 6px 14px; margin: 4px; cursor: pointer; color: #7ba3c8; font-size: 0.8rem; transition: all 0.2s; }
+    .suggestion-pill:hover { background: #1e3a5f; color: #00d4ff; border-color: #00d4ff; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -282,7 +290,7 @@ def main():
     clean_display = display_df[~display_df["primary_fuel"].isin(FOSSIL_FUELS)]
     display_df = pd.concat([fossil_display, clean_display])
 
-    tab1, tab2, tab3 = st.tabs(["🌍 Geospatial Intelligence Map", "🏆 State Leaderboard", "☀️💨 Surya-Vayu Analysis"])
+    tab1, tab2, tab3, tab4 = st.tabs(["🌍 Geospatial Intelligence Map", "🏆 State Leaderboard", "☀️💨 Surya-Vayu Analysis", "🤖 VayuAkra AI"])
 
     with tab1:
         st.markdown('<div class="section-header">Transition Score Geospatial Overview</div>', unsafe_allow_html=True)
@@ -667,5 +675,272 @@ def main():
                 st.dataframe(comp_data, use_container_width=True, hide_index=True)
             else:
                 st.info("No other fossil plants found in the same state.")
+
+@st.cache_resource
+def load_qa_engine():
+    qa_df = pd.read_csv("qa_data.csv")
+    vectorizer = TfidfVectorizer(ngram_range=(1, 2), stop_words="english", max_features=5000)
+    tfidf_matrix = vectorizer.fit_transform(qa_df["question"].str.lower())
+    return qa_df, vectorizer, tfidf_matrix
+
+def find_best_answer(query, qa_df, vectorizer, tfidf_matrix, threshold=0.12):
+    q_vec = vectorizer.transform([query.lower()])
+    scores = cosine_similarity(q_vec, tfidf_matrix).flatten()
+    best_idx = scores.argmax()
+    best_score = scores[best_idx]
+    if best_score < threshold:
+        return None, best_score
+    return qa_df.iloc[best_idx]["answer"], best_score
+
+def get_live_plant_answer(df, query):
+    fossil_df = df[df["primary_fuel"].isin(FOSSIL_FUELS)].copy()
+    query_words = query.lower().split()
+    best_match = None
+    best_len = 0
+    for _, row in fossil_df.iterrows():
+        plant_words = row["name"].lower().split()
+        common = sum(1 for w in query_words if any(w in pw or pw in w for pw in plant_words))
+        if common > best_len and common >= 2:
+            best_len = common
+            best_match = row
+    if best_match is not None:
+        row = best_match
+        solar_cols = [f"solar_m{str(i).zfill(2)}" for i in range(1, 13)]
+        solar_vals = [row.get(c, 0) for c in solar_cols]
+        solar_mean = float(np.mean([v for v in solar_vals if pd.notna(v)]))
+        age_note = ""
+        cy = row.get("commissioning_year")
+        if pd.notna(cy):
+            age = CURRENT_YEAR - int(cy)
+            age_note = f"commissioned in {int(cy)} ({age} years old)"
+        else:
+            assumed = 30 if row["primary_fuel"] == "Coal" else 20
+            age_note = f"commissioning year unknown — assumed {assumed} years old"
+        mix_desc = {
+            "Hybrid Candidate": "a Hybrid Candidate — both solar and wind are strong here, ideal for co-located generation",
+            "Solar": "Solar-primary — excellent solar irradiance makes utility-scale PV the best replacement",
+            "Wind": "Wind-primary — strong winds at 100m make a wind farm the optimal replacement",
+        }.get(row["recommended_mix"], row["recommended_mix"])
+        urgency = {
+            "Urgent Replacement": "🔴 URGENT — top priority for immediate retirement planning",
+            "Moderate Priority": "🟡 MODERATE — significant retirement case, not immediately critical",
+            "Low Priority": "🟢 LOW PRIORITY — lower urgency based on current scoring",
+        }.get(row["classification"], row["classification"])
+        return (
+            f"\U0001f4ca **{row['name']}**\n\n"
+            f"\u2022 **Fuel:** {row['primary_fuel']} | **Capacity:** {row['capacity_mw']:.0f} MW\n"
+            f"\u2022 **State:** {row['state_name']} | **Age:** {age_note}\n"
+            f"\u2022 **Transition Score:** {row['transition_score']:.1f}/100 \u2014 {urgency}\n"
+            f"\u2022 **Score Breakdown:** Age {row['age_score']:.1f} + Resource {row['renewable_score']:.1f} + Grid {row['grid_score']:.1f}\n"
+            f"\u2022 **Recommended Mix:** {mix_desc}\n"
+            f"\u2022 **Solar Potential:** {solar_mean:.2f} kWh/m\u00b2/day annual mean\n"
+            f"\u2022 **Wind Speed @ 100m:** {row.get('wind_speed_100m', 'N/A')} m/s"
+        )
+    return None
+
+def get_live_state_answer(df, fossil_ratio_df, query):
+    query_lower = query.lower()
+    state_keywords = {
+        "chhattisgarh": "Chhattisgarh", "jharkhand": "Jharkhand", "bihar": "Bihar",
+        "madhya pradesh": "Madhya Pradesh", "mp": "Madhya Pradesh", "uttar pradesh": "Uttar Pradesh",
+        "up": "Uttar Pradesh", "rajasthan": "Rajasthan", "gujarat": "Gujarat",
+        "maharashtra": "Maharashtra", "karnataka": "Karnataka", "tamil nadu": "Tamil Nadu",
+        "andhra pradesh": "Andhra Pradesh", "telangana": "Telangana", "west bengal": "West Bengal",
+        "odisha": "Odisha", "punjab": "Punjab", "haryana": "Haryana", "kerala": "Kerala",
+        "assam": "Assam", "himachal": "Himachal Pradesh",
+    }
+    matched_state = None
+    for keyword, state_name in state_keywords.items():
+        if keyword in query_lower:
+            matched_state = state_name
+            break
+    if matched_state:
+        fossil_df = df[df["primary_fuel"].isin(FOSSIL_FUELS)].copy()
+        state_plants = fossil_df[fossil_df["state_name"] == matched_state]
+        state_row = fossil_ratio_df[fossil_ratio_df["state_name"] == matched_state]
+        if not state_row.empty:
+            fr = state_row.iloc[0]
+            fossil_pct = fr["fossil_ratio"] * 100
+            top3 = state_plants.nlargest(3, "transition_score")[["name", "transition_score", "recommended_mix"]]
+            top3_str = "\n".join([f"  {i+1}. {r['name']} \u2014 Score {r['transition_score']:.1f} ({r['recommended_mix']})" for i, (_, r) in enumerate(top3.iterrows())])
+            urgent = (state_plants["transition_score"] >= 70).sum()
+            return (
+                f"\U0001f4cd **{matched_state} \u2014 State Energy Profile**\n\n"
+                f"\u2022 **Fossil Grid Share:** {fossil_pct:.1f}% fossil / {100-fossil_pct:.1f}% clean\n"
+                f"\u2022 **Total Fossil Capacity:** {fr['Fossil']:,.0f} MW | **Clean Capacity:** {fr['Clean']:,.0f} MW\n"
+                f"\u2022 **Coal Plants in State:** {len(state_plants)} | **Urgent Replacements:** {urgent}\n\n"
+                f"\U0001f3ed **Top 3 Priority Plants to Retire:**\n{top3_str}"
+            )
+    return None
+
+def build_system_prompt(df, fossil_ratio_df):
+    fossil_df = df[df["primary_fuel"].isin(FOSSIL_FUELS)]
+    top_urgent = fossil_df.nlargest(5, "transition_score")[["name", "primary_fuel", "capacity_mw", "transition_score", "state_name", "recommended_mix"]].to_string(index=False)
+    state_summary = fossil_ratio_df.sort_values("fossil_ratio", ascending=False).head(8)[["state_name", "fossil_ratio", "Fossil", "Clean"]].to_string(index=False)
+    total_fossil_mw = fossil_df["capacity_mw"].sum()
+    urgent_count = (fossil_df["transition_score"] >= 70).sum()
+    hybrid_count = (fossil_df["recommended_mix"] == "Hybrid Candidate").sum()
+    solar_count = (fossil_df["recommended_mix"] == "Solar").sum()
+    wind_count = (fossil_df["recommended_mix"] == "Wind").sum()
+
+    return f"""You are VayuAkra AI, an expert energy transition analyst embedded inside the VayuAkra dashboard — India's AI-driven fossil-to-renewable transition intelligence platform.
+
+PLATFORM CONTEXT:
+- VayuAkra analyses {len(df):,} power plants across India, of which {len(fossil_df)} are fossil-fuel plants (Coal, Gas, Oil)
+- Total fossil capacity under analysis: {total_fossil_mw:,.0f} MW
+- Urgent replacement candidates (score ≥ 70): {urgent_count} plants
+- Hybrid Candidates (high solar + high wind): {hybrid_count} plants
+- Solar-primary recommendations: {solar_count} plants
+- Wind-primary recommendations: {wind_count} plants
+
+SCORING SYSTEM (0-100, higher = more urgent to replace):
+- Age Component (40%): Older plants score higher. Missing commissioning year → assumes 30 yrs for Coal, 20 yrs for Gas
+- Renewable Resource (40%): Mean of 12-month solar irradiance bands + wind speed at 100m, both normalised nationally
+- Regional Grid Priority (20%): States with high fossil dependency get elevated scores
+- Classifications: Urgent ≥70 | Moderate 40-69 | Low Priority <40 | Already Clean (renewables)
+- Hybrid Candidate: Plant site exceeds 75th percentile for BOTH solar AND wind
+
+TOP 5 MOST URGENT PLANTS:
+{top_urgent}
+
+STATE FOSSIL DEPENDENCY (Top 8 by fossil ratio):
+{state_summary}
+
+YOUR BEHAVIOUR:
+- Answer questions about any plant, state, score, renewable mix, or transition strategy in the dataset
+- Be concise but insightful — bullet points for comparisons, prose for explanations
+- When asked about a specific plant, give its score breakdown, recommended mix, and strategic context
+- When asked about a state, explain its fossil ratio, top plants to retire, and renewable potential
+- You can explain what Solar, Wind, and Hybrid Candidate classifications mean for site planning
+- Use emojis sparingly for readability (☀️ 💨 ⚡ 🏭 📊)
+- If asked something outside the energy/India context, politely redirect to VayuAkra topics
+- Never make up plant names or scores not in the dataset; say you don't have that data if unsure
+"""
+
+def get_plant_context(df, query):
+    fossil_df = df[df["primary_fuel"].isin(FOSSIL_FUELS)].copy()
+    query_lower = query.lower()
+    matched = fossil_df[fossil_df["name"].str.lower().str.contains(query_lower, na=False)]
+    if not matched.empty:
+        row = matched.iloc[0]
+        solar_cols = [f"solar_m{str(i).zfill(2)}" for i in range(1, 13)]
+        solar_vals = [row.get(c, 0) for c in solar_cols]
+        solar_mean = float(np.mean([v for v in solar_vals if pd.notna(v)]))
+        return f"""\n\nDETAILED PLANT DATA for {row['name']}:
+- Fuel: {row['primary_fuel']} | Capacity: {row['capacity_mw']:.0f} MW
+- State: {row['state_name']} | Transition Score: {row['transition_score']:.1f}/100
+- Classification: {row['classification']} | Recommended Mix: {row['recommended_mix']}
+- Age Score: {row['age_score']:.1f} | Resource Score: {row['renewable_score']:.1f} | Grid Score: {row['grid_score']:.1f}
+- Solar Mean: {solar_mean:.2f} kWh/m²/day | Wind @ 100m: {row.get('wind_speed_100m', 'N/A')} m/s
+- Commissioning Year: {row.get('commissioning_year', 'Unknown')}
+- Location: {row['latitude']:.2f}°N, {row['longitude']:.2f}°E"""
+    return ""
+
+def render_chatbot_tab(df, fossil_ratio_df):
+    st.markdown('<div class="section-header">⚡ VayuAkra AI — Your Energy Transition Analyst</div>', unsafe_allow_html=True)
+
+    qa_df, vectorizer, tfidf_matrix = load_qa_engine()
+
+    col_intro, col_stats = st.columns([3, 1])
+    with col_intro:
+        st.markdown("""
+        <div style="background:linear-gradient(135deg,#0d1f35,#0a1628);border:1px solid #1e3a5f;border-radius:12px;padding:16px 20px;margin-bottom:16px;">
+            <div style="color:#00d4ff;font-weight:700;font-size:1rem;margin-bottom:6px;">🤖 Ask me anything about India's energy transition</div>
+            <div style="color:#7ba3c8;font-size:0.83rem;line-height:1.7;">
+                I know every plant score renewable potential and replacement strategy. Ask about specific plants states scoring logic or renewable mixes. Type a plant or state name for live data!
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with col_stats:
+        fossil_df_c = df[df["primary_fuel"].isin(FOSSIL_FUELS)]
+        urgent = (fossil_df_c["transition_score"] >= 70).sum()
+        st.markdown(f"""
+        <div style="background:linear-gradient(135deg,#1a0a0a,#2a0a0a);border:1px solid #ff3b3b44;border-radius:12px;padding:14px;text-align:center;">
+            <div style="font-size:1.8rem;font-weight:700;color:#ff6b6b;">{urgent}</div>
+            <div style="font-size:0.72rem;color:#ff9999;text-transform:uppercase;letter-spacing:1px;">Urgent Plants</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    if "vayuakra_messages" not in st.session_state:
+        st.session_state.vayuakra_messages = []
+
+    suggestions = [
+        "🏭 Which plant needs replacement most urgently?",
+        "☀️ What is a Hybrid Candidate?",
+        "📊 Which state has the worst fossil dependency?",
+        "💨 How is the Transition Score calculated?",
+        "⚡ What does Urgent Replacement mean?",
+        "🔴 Which region has the best hybrid potential?",
+    ]
+
+    if not st.session_state.vayuakra_messages:
+        st.markdown("**Quick questions — click to ask:**")
+        cols = st.columns(3)
+        for i, sug in enumerate(suggestions):
+            with cols[i % 3]:
+                if st.button(sug, key=f"sug_{i}", use_container_width=True):
+                    st.session_state.vayuakra_messages.append({"role": "user", "content": sug})
+                    st.rerun()
+
+    chat_html = '<div class="chat-container">'
+    for msg in st.session_state.vayuakra_messages:
+        if msg["role"] == "user":
+            chat_html += f'''<div class="chat-msg-user"><b>You</b><br>{msg["content"]}</div>'''
+        else:
+            formatted = msg["content"].replace("\n", "<br>").replace("**", "<b>", 1)
+            i = 0
+            result = ""
+            bold_open = False
+            for ch in msg["content"]:
+                pass
+            display_text = msg["content"].replace("\n", "<br>")
+            chat_html += f'''<div class="chat-msg-ai"><span class="chat-avatar-ai">⚡</span> <b>VayuAkra AI</b><br>{display_text}</div>'''
+    chat_html += "</div>"
+
+    if st.session_state.vayuakra_messages:
+        st.markdown(chat_html, unsafe_allow_html=True)
+
+    col_input, col_btn, col_clear = st.columns([7, 1, 1])
+    with col_input:
+        user_input = st.text_input(
+            "Ask VayuAkra AI...",
+            placeholder="e.g. Tell me about Korba Power Plant  |  Which state is worst?  |  What is a hybrid candidate?",
+            label_visibility="collapsed",
+            key="chat_input"
+        )
+    with col_btn:
+        send = st.button("Send ➤", use_container_width=True, type="primary")
+    with col_clear:
+        if st.button("Clear 🗑", use_container_width=True):
+            st.session_state.vayuakra_messages = []
+            st.rerun()
+
+    if send and user_input.strip():
+        query = user_input.strip()
+        st.session_state.vayuakra_messages.append({"role": "user", "content": query})
+
+        plant_answer = get_live_plant_answer(df, query)
+        if plant_answer:
+            reply = plant_answer
+        else:
+            state_answer = get_live_state_answer(df, fossil_ratio_df, query)
+            if state_answer:
+                reply = state_answer
+            else:
+                answer, score = find_best_answer(query, qa_df, vectorizer, tfidf_matrix)
+                if answer:
+                    reply = f"💡 {answer}"
+                else:
+                    fossil_df_r = df[df["primary_fuel"].isin(FOSSIL_FUELS)]
+                    top_plant = fossil_df_r.nlargest(1, "transition_score").iloc[0]
+                    reply = (
+                        f"I didn't quite catch that — try asking about a specific plant name state or topic like scoring hybrid candidates or renewable mixes!\n\n"
+                        f"💡 Quick fact: The most urgent plant right now is **{top_plant['name']}** in {top_plant['state_name']} "
+                        f"with a Transition Score of {top_plant['transition_score']:.1f}/100."
+                    )
+
+        st.session_state.vayuakra_messages.append({"role": "assistant", "content": reply})
+        st.rerun()
 
 main()
