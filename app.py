@@ -676,9 +676,20 @@ def main():
             else:
                 st.info("No other fossil plants found in the same state.")
 
+    with tab4:
+        render_chatbot_tab(df, fossil_ratio_df)
+
 @st.cache_resource
 def load_qa_engine():
-    qa_df = pd.read_csv("qa_data.csv")
+    import os
+    paths = ["qa_data.csv", os.path.join(os.path.dirname(__file__), "qa_data.csv")]
+    qa_df = None
+    for p in paths:
+        if os.path.exists(p):
+            qa_df = pd.read_csv(p)
+            break
+    if qa_df is None:
+        return None, None, None
     vectorizer = TfidfVectorizer(ngram_range=(1, 2), stop_words="english", max_features=5000)
     tfidf_matrix = vectorizer.fit_transform(qa_df["question"].str.lower())
     return qa_df, vectorizer, tfidf_matrix
@@ -697,10 +708,14 @@ def get_live_plant_answer(df, query):
     query_words = query.lower().split()
     best_match = None
     best_len = 0
+    plant_trigger = any(w in query_lower for w in ["plant", "station", "power", "thermal", "ntpc", "capacity", "site"])
     for _, row in fossil_df.iterrows():
-        plant_words = row["name"].lower().split()
-        common = sum(1 for w in query_words if any(w in pw or pw in w for pw in plant_words))
-        if common > best_len and common >= 2:
+        name_lower = row["name"].lower()
+        plant_words = [w for w in name_lower.split() if len(w) > 3]
+        query_content_words = [w for w in query_words if len(w) > 3 and w not in ["what", "tell", "show", "about", "this", "that", "with", "from", "have", "does", "which", "where", "when", "explain"]]
+        common = sum(1 for w in query_content_words if w in name_lower)
+        min_needed = 2 if not plant_trigger else 1
+        if common > best_len and common >= min_needed and common >= len(query_content_words) * 0.5:
             best_len = common
             best_match = row
     if best_match is not None:
@@ -839,7 +854,15 @@ def get_plant_context(df, query):
 def render_chatbot_tab(df, fossil_ratio_df):
     st.markdown('<div class="section-header">⚡ VayuAkra AI — Your Energy Transition Analyst</div>', unsafe_allow_html=True)
 
-    qa_df, vectorizer, tfidf_matrix = load_qa_engine()
+    try:
+        qa_df, vectorizer, tfidf_matrix = load_qa_engine()
+        qa_ready = qa_df is not None
+    except Exception as e:
+        qa_df, vectorizer, tfidf_matrix = None, None, None
+        qa_ready = False
+
+    if not qa_ready:
+        st.warning("⚠️ qa_data.csv not found. Make sure it is uploaded to the repo root alongside app.py.")
 
     col_intro, col_stats = st.columns([3, 1])
     with col_intro:
@@ -888,13 +911,9 @@ def render_chatbot_tab(df, fossil_ratio_df):
         if msg["role"] == "user":
             chat_html += f'''<div class="chat-msg-user"><b>You</b><br>{msg["content"]}</div>'''
         else:
-            formatted = msg["content"].replace("\n", "<br>").replace("**", "<b>", 1)
-            i = 0
-            result = ""
-            bold_open = False
-            for ch in msg["content"]:
-                pass
+            import re
             display_text = msg["content"].replace("\n", "<br>")
+            display_text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', display_text)
             chat_html += f'''<div class="chat-msg-ai"><span class="chat-avatar-ai">⚡</span> <b>VayuAkra AI</b><br>{display_text}</div>'''
     chat_html += "</div>"
 
@@ -920,25 +939,38 @@ def render_chatbot_tab(df, fossil_ratio_df):
         query = user_input.strip()
         st.session_state.vayuakra_messages.append({"role": "user", "content": query})
 
-        plant_answer = get_live_plant_answer(df, query)
-        if plant_answer:
-            reply = plant_answer
-        else:
+        fossil_df_r = df[df["primary_fuel"].isin(FOSSIL_FUELS)]
+        top_plant = fossil_df_r.nlargest(1, "transition_score").iloc[0]
+
+        reply = None
+
+        if qa_ready:
+            answer, score = find_best_answer(query, qa_df, vectorizer, tfidf_matrix)
+            if answer and score >= 0.18:
+                reply = f"💡 {answer}"
+
+        if reply is None:
             state_answer = get_live_state_answer(df, fossil_ratio_df, query)
             if state_answer:
                 reply = state_answer
-            else:
+
+        if reply is None:
+            plant_answer = get_live_plant_answer(df, query)
+            if plant_answer:
+                reply = plant_answer
+
+        if reply is None:
+            if qa_ready:
                 answer, score = find_best_answer(query, qa_df, vectorizer, tfidf_matrix)
                 if answer:
                     reply = f"💡 {answer}"
-                else:
-                    fossil_df_r = df[df["primary_fuel"].isin(FOSSIL_FUELS)]
-                    top_plant = fossil_df_r.nlargest(1, "transition_score").iloc[0]
-                    reply = (
-                        f"I didn't quite catch that — try asking about a specific plant name state or topic like scoring hybrid candidates or renewable mixes!\n\n"
-                        f"💡 Quick fact: The most urgent plant right now is **{top_plant['name']}** in {top_plant['state_name']} "
-                        f"with a Transition Score of {top_plant['transition_score']:.1f}/100."
-                    )
+
+        if reply is None:
+            reply = (
+                f"Hmm, I couldn't find a great match for that. Try asking about a specific plant name, state, or topics like scoring, hybrid candidates, renewable mixes, or India's energy policy!\n\n"
+                f"💡 Quick fact: The most urgent plant right now is **{top_plant['name']}** in {top_plant['state_name']} "
+                f"with a Transition Score of {top_plant['transition_score']:.1f}/100."
+            )
 
         st.session_state.vayuakra_messages.append({"role": "assistant", "content": reply})
         st.rerun()
